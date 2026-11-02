@@ -105,6 +105,17 @@ var _ = Describe("ConsolePlugin Controller", func() {
 		if k8sClient.Get(ctx, types.NamespacedName{Name: consolePluginName, Namespace: operatorNamespace}, sa) == nil {
 			_ = k8sClient.Delete(ctx, sa)
 		}
+
+		// Cluster-scoped, so a leftover would outlive the test namespace.
+		crb := &rbacv1.ClusterRoleBinding{}
+		if k8sClient.Get(ctx, types.NamespacedName{Name: consolePluginTokenReviewName}, crb) == nil {
+			_ = k8sClient.Delete(ctx, crb)
+		}
+
+		role := &rbacv1.ClusterRole{}
+		if k8sClient.Get(ctx, types.NamespacedName{Name: consolePluginTokenReviewName}, role) == nil {
+			_ = k8sClient.Delete(ctx, role)
+		}
 	})
 
 	createConfigMap := func(data map[string]string) {
@@ -154,6 +165,18 @@ var _ = Describe("ConsolePlugin Controller", func() {
 		rb := &rbacv1.RoleBinding{}
 		err := k8sClient.Get(ctx, types.NamespacedName{Name: consolePluginName, Namespace: operatorNamespace}, rb)
 		return rb, err
+	}
+
+	getTokenReviewClusterRole := func() (*rbacv1.ClusterRole, error) {
+		role := &rbacv1.ClusterRole{}
+		err := k8sClient.Get(ctx, types.NamespacedName{Name: consolePluginTokenReviewName}, role)
+		return role, err
+	}
+
+	getTokenReviewClusterRoleBinding := func() (*rbacv1.ClusterRoleBinding, error) {
+		crb := &rbacv1.ClusterRoleBinding{}
+		err := k8sClient.Get(ctx, types.NamespacedName{Name: consolePluginTokenReviewName}, crb)
+		return crb, err
 	}
 
 	doReconcile := func() (reconcile.Result, error) {
@@ -391,6 +414,37 @@ var _ = Describe("ConsolePlugin Controller", func() {
 		})
 	})
 
+	Context("buildTokenReviewClusterRole", func() {
+		// The plugin backend resolves console-forwarded user tokens with
+		// TokenReview under its own ServiceAccount identity.
+		It("should allow the plugin to create tokenreviews only", func() {
+			role := reconciler.buildTokenReviewClusterRole()
+			Expect(role.Name).To(Equal(consolePluginTokenReviewName))
+			Expect(role.Namespace).To(BeEmpty())
+			Expect(role.Rules).To(HaveLen(1))
+
+			rule := role.Rules[0]
+			Expect(rule.APIGroups).To(Equal([]string{"authentication.k8s.io"}))
+			Expect(rule.Resources).To(Equal([]string{"tokenreviews"}))
+			Expect(rule.Verbs).To(ConsistOf("create"))
+		})
+	})
+
+	Context("buildTokenReviewClusterRoleBinding", func() {
+		It("should bind the role to the plugin ServiceAccount", func() {
+			crb := reconciler.buildTokenReviewClusterRoleBinding()
+			Expect(crb.Name).To(Equal(consolePluginTokenReviewName))
+			Expect(crb.Namespace).To(BeEmpty())
+			Expect(crb.RoleRef.Kind).To(Equal("ClusterRole"))
+			Expect(crb.RoleRef.Name).To(Equal(consolePluginTokenReviewName))
+
+			Expect(crb.Subjects).To(HaveLen(1))
+			Expect(crb.Subjects[0].Kind).To(Equal(rbacv1.ServiceAccountKind))
+			Expect(crb.Subjects[0].Name).To(Equal(consolePluginName))
+			Expect(crb.Subjects[0].Namespace).To(Equal(operatorNamespace))
+		})
+	})
+
 	Context("Reconcile", func() {
 		It("should create all resources when enabled", func() {
 			createConfigMap(map[string]string{consolePluginConfigKey: "true"})
@@ -418,6 +472,12 @@ var _ = Describe("ConsolePlugin Controller", func() {
 			Expect(err).NotTo(HaveOccurred())
 
 			_, err = getRoleBinding()
+			Expect(err).NotTo(HaveOccurred())
+
+			_, err = getTokenReviewClusterRole()
+			Expect(err).NotTo(HaveOccurred())
+
+			_, err = getTokenReviewClusterRoleBinding()
 			Expect(err).NotTo(HaveOccurred())
 		})
 
@@ -454,6 +514,12 @@ var _ = Describe("ConsolePlugin Controller", func() {
 			Expect(apierrors.IsNotFound(err)).To(BeTrue())
 
 			_, err = getRoleBinding()
+			Expect(apierrors.IsNotFound(err)).To(BeTrue())
+
+			_, err = getTokenReviewClusterRole()
+			Expect(apierrors.IsNotFound(err)).To(BeTrue())
+
+			_, err = getTokenReviewClusterRoleBinding()
 			Expect(apierrors.IsNotFound(err)).To(BeTrue())
 		})
 
