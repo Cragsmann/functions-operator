@@ -18,6 +18,8 @@ package controller
 
 import (
 	"context"
+	"os"
+	"slices"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -29,6 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
@@ -445,7 +448,66 @@ var _ = Describe("ConsolePlugin Controller", func() {
 		})
 	})
 
+	Context("operator ClusterRole", func() {
+		// RBAC only lets the operator grant permissions it holds itself, so
+		// the operator's own role has to cover the token review grant.
+		// envtest runs as cluster-admin and cannot catch a gap here.
+		var operatorRole rbacv1.ClusterRole
+
+		BeforeEach(func() {
+			data, err := os.ReadFile("../../config/openshift/rbac/consoleplugin_clusterrole.yaml")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(utilyaml.Unmarshal(data, &operatorRole)).To(Succeed())
+		})
+
+		allows := func(group, resource, name, verb string) bool {
+			return slices.ContainsFunc(operatorRole.Rules, func(rule rbacv1.PolicyRule) bool {
+				return slices.Contains(rule.APIGroups, group) &&
+					slices.Contains(rule.Resources, resource) &&
+					slices.Contains(rule.Verbs, verb) &&
+					(len(rule.ResourceNames) == 0 || slices.Contains(rule.ResourceNames, name))
+			})
+		}
+
+		It("should hold every permission the token review ClusterRole grants", func() {
+			for _, rule := range reconciler.buildTokenReviewClusterRole().Rules {
+				for _, group := range rule.APIGroups {
+					for _, resource := range rule.Resources {
+						for _, verb := range rule.Verbs {
+							Expect(allows(group, resource, "", verb)).To(BeTrue(),
+								"operator cannot grant %s %s/%s", verb, group, resource)
+						}
+					}
+				}
+			}
+		})
+
+		It("should be able to reconcile the token review grant", func() {
+			for _, resource := range []string{"clusterroles", "clusterrolebindings"} {
+				for _, verb := range []string{"get", "list", "watch", "create", "update", "delete"} {
+					Expect(allows(rbacv1.GroupName, resource, consolePluginTokenReviewName, verb)).To(BeTrue(),
+						"operator cannot %s %s", verb, resource)
+				}
+			}
+		})
+	})
+
 	Context("Reconcile", func() {
+		It("should replace a token review ClusterRoleBinding whose roleRef changed", func() {
+			createConfigMap(map[string]string{consolePluginConfigKey: "true"})
+
+			stale := reconciler.buildTokenReviewClusterRoleBinding()
+			stale.RoleRef.Name = "some-other-role"
+			Expect(k8sClient.Create(ctx, stale)).To(Succeed())
+
+			_, err := doReconcile()
+			Expect(err).NotTo(HaveOccurred())
+
+			crb, err := getTokenReviewClusterRoleBinding()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(crb.RoleRef.Name).To(Equal(consolePluginTokenReviewName))
+		})
+
 		It("should create all resources when enabled", func() {
 			createConfigMap(map[string]string{consolePluginConfigKey: "true"})
 

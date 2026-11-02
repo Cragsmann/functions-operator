@@ -77,10 +77,6 @@ type ConsolePluginReconciler struct {
 	clusterOwnerRef    *metav1.OwnerReference
 }
 
-// The token review grant is cluster-scoped, unlike the rest of the plugin
-// resources, so the operator needs cluster-scoped RBAC to reconcile it.
-// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterroles;clusterrolebindings,verbs=get;list;watch;create;update;patch;delete
-
 func (r *ConsolePluginReconciler) Reconcile(ctx context.Context, _ ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
@@ -1095,6 +1091,34 @@ func (r *ConsolePluginReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			handler.EnqueueRequestsFromMapFunc(r.mapToRequest),
 			builder.WithPredicates(predicate.NewPredicateFuncs(func(obj client.Object) bool {
 				return obj.GetName() == consolePluginName && obj.GetNamespace() == r.OperatorNamespace
+			})),
+		).
+		Watches(
+			&rbacv1.Role{},
+			handler.EnqueueRequestsFromMapFunc(r.mapToRequest),
+			builder.WithPredicates(predicate.NewPredicateFuncs(func(obj client.Object) bool {
+				return obj.GetName() == consolePluginName && obj.GetNamespace() == r.OperatorNamespace
+			})),
+		).
+		Watches(
+			&rbacv1.RoleBinding{},
+			handler.EnqueueRequestsFromMapFunc(r.mapToRequest),
+			builder.WithPredicates(predicate.NewPredicateFuncs(func(obj client.Object) bool {
+				return obj.GetName() == consolePluginName && obj.GetNamespace() == r.OperatorNamespace
+			})),
+		).
+		Watches(
+			&rbacv1.ClusterRole{},
+			handler.EnqueueRequestsFromMapFunc(r.mapToRequest),
+			builder.WithPredicates(predicate.NewPredicateFuncs(func(obj client.Object) bool {
+				return obj.GetName() == consolePluginTokenReviewName
+			})),
+		).
+		Watches(
+			&rbacv1.ClusterRoleBinding{},
+			handler.EnqueueRequestsFromMapFunc(r.mapToRequest),
+			builder.WithPredicates(predicate.NewPredicateFuncs(func(obj client.Object) bool {
+				return obj.GetName() == consolePluginTokenReviewName
 			})),
 		).
 		Complete(r)
